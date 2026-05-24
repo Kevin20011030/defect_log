@@ -604,6 +604,8 @@ export default function App() {
     contextBefore: string[];
     contextAfter: string[];
     ltState: 'ON' | 'OFF' | 'UNKNOWN';
+    foundPhyDiag?: boolean;
+    reachedStart?: boolean;
   }
 
   interface PortStatusInfo {
@@ -783,8 +785,26 @@ export default function App() {
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
       if (ucStsRegex.test(line)) {
-        // Collect up and down 6 lines each (total 13 lines block)
-        const startIdx = Math.max(0, i - 6);
+        // Collect upwards: search to find nearest "dsh -c 'phy diag" command (inclusive)
+        let startIdx = -1;
+        let foundPhyDiag = false;
+        for (let j = i - 1; j >= 0; j--) {
+          const lLower = lines[j].toLowerCase();
+          if (lLower.includes("dsh -c 'phy diag") || /dsh\s+-c\s+['"]phy\s+diag/i.test(lines[j])) {
+            startIdx = j;
+            foundPhyDiag = true;
+            break;
+          }
+        }
+        
+        let reachedStart = false;
+        if (startIdx === -1) {
+          startIdx = Math.max(0, i - 6);
+          if (startIdx === 0) {
+            reachedStart = true;
+          }
+        }
+
         const endIdx = Math.min(lines.length - 1, i + 6);
         
         const contextBefore = lines.slice(startIdx, i);
@@ -796,7 +816,9 @@ export default function App() {
           matchText: line,
           contextBefore,
           contextAfter,
-          ltState
+          ltState,
+          foundPhyDiag,
+          reachedStart
         });
       }
     }
@@ -1033,8 +1055,8 @@ export default function App() {
         ltOffMatches.forEach((match, idx) => {
           report += `--- LT OFF 状态 - 第 ${idx + 1} 处异常关联信息 (行号: L${match.lineNum}) ---\n`;
           const beforeLen = match.contextBefore.length;
-          if (beforeLen < 6) {
-            report += `[边界提示: 日志顶部已触顶，上方实际记录少于 6 行]\n`;
+          if (beforeLen < 6 && !match.foundPhyDiag) {
+            report += `[边界提示: 日志顶部已触顶，上方实际记录少于 6 行，并且未找到相关的 dsh -c 'phy diag 命令]\n`;
           }
           match.contextBefore.forEach((line, bIdx) => {
             const actualLineNum = match.lineNum - beforeLen + bIdx;
@@ -1063,8 +1085,8 @@ export default function App() {
         ltOnMatches.forEach((match, idx) => {
           report += `--- LT ON 状态 - 第 ${idx + 1} 处异常关联信息 (行号: L${match.lineNum}) ---\n`;
           const beforeLen = match.contextBefore.length;
-          if (beforeLen < 6) {
-            report += `[边界提示: 日志顶部已触顶，上方实际记录少于 6 行]\n`;
+          if (beforeLen < 6 && !match.foundPhyDiag) {
+            report += `[边界提示: 日志顶部已触顶，上方实际记录少于 6 行，并且未找到相关的 dsh -c 'phy diag 命令]\n`;
           }
           match.contextBefore.forEach((line, bIdx) => {
             const actualLineNum = match.lineNum - beforeLen + bIdx;
@@ -1091,8 +1113,8 @@ export default function App() {
         ltUnknownMatches.forEach((match, idx) => {
           report += `--- 未识别 LT 状态 - 第 ${idx + 1} 处异常关联信息 (行号: L${match.lineNum}) ---\n`;
           const beforeLen = match.contextBefore.length;
-          if (beforeLen < 6) {
-            report += `[边界提示: 日志顶部已触顶，上方实际记录少于 6 行]\n`;
+          if (beforeLen < 6 && !match.foundPhyDiag) {
+            report += `[边界提示: 日志顶部已触顶，上方实际记录少于 6 行，并且未找到相关的 dsh -c 'phy diag 命令]\n`;
           }
           match.contextBefore.forEach((line, bIdx) => {
             const actualLineNum = match.lineNum - beforeLen + bIdx;
@@ -1615,8 +1637,8 @@ export default function App() {
                       </p>
                       <div className="bg-white border border-black/[0.04] p-3 rounded-xl text-[10px] text-[#555] font-mono leading-relaxed space-y-1.5">
                         <div className="flex justify-between">
-                           <span>📊 <strong>提取上下文：</strong>上下各追溯 6 行 (合成 13 行段)</span>
-                           <span className="text-[#0071e3] font-bold">13 行诊断框</span>
+                           <span>📊 <strong>提取上下文：</strong>向上追溯至最近一次 <code>dsh -c 'phy diag</code> 字段，向下追溯 6 行</span>
+                           <span className="text-[#0071e3] font-bold">自适应上下文</span>
                         </div>
                         <div>🛡️ <strong>独立提取去重：</strong>按捕获点独立输出，带首尾溢出及文件触顶/底边界气泡。</div>
                       </div>
@@ -2369,7 +2391,7 @@ export default function App() {
                                     <button
                                       onClick={() => copySingleFaultMatchToClipboard(match)}
                                       className="p-1.5 text-[#86868b] hover:text-[#0071e3] hover:bg-[#0071e3]/5 rounded-lg transition-all cursor-pointer"
-                                      title="复制这 13 行上下文内容"
+                                      title="复制这段诊断上下文内容"
                                     >
                                       {copiedSingleMatch === String(match.lineNum) ? (
                                         <Check className="w-3.5 h-3.5 text-green-500 animate-scaleIn" />
@@ -2380,7 +2402,7 @@ export default function App() {
                                     <button
                                       onClick={() => downloadSingleFaultMatch(match)}
                                       className="p-1.5 text-[#86868b] hover:text-[#0071e3] hover:bg-[#0071e3]/5 rounded-lg transition-all cursor-pointer"
-                                      title="导出此 13 行段文件"
+                                      title="导出这段诊断上下文文件"
                                     >
                                       <Download className="w-3.5 h-3.5" />
                                     </button>
@@ -2413,9 +2435,9 @@ export default function App() {
                                     >
                                       <div className="p-4 space-y-1">
                                         {/* Context Before */}
-                                        {match.contextBefore.length < 6 && (
+                                        {match.contextBefore.length < 6 && !match.foundPhyDiag && (
                                           <div className="text-[10px] text-orange-500 font-semibold bg-orange-500/5 border border-orange-500/10 rounded px-2.5 py-1 mb-2">
-                                            ⚠ [边界提示] 已经到达日志开头，前置上下文实际只有 {match.contextBefore.length} 行
+                                            ⚠ [边界提示] 已经到达日志开头，前置上下文实际只有 {match.contextBefore.length} 行，且未找到相关的 dsh -c 'phy diag 命令
                                           </div>
                                         )}
                                         
