@@ -1,0 +1,8 @@
+{
+  "name": "日志命令提取器",
+  "description": "专为芯片测试工程师设计的专业工具，可从日志文件中精准提取目标命令及其输出，支持 Broadcom SDK 固件自动检验与 uc_sts / uc_sts_ext Bit 底层故障智能定位。",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
