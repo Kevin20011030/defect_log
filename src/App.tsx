@@ -65,8 +65,6 @@ export default function App() {
   const [pinLane, setPinLane] = useState<string>('lane0');
   const [pinType, setPinType] = useState<'RX' | 'TX'>('RX');
   const [copiedPinResult, setCopiedPinResult] = useState(false);
-
-  // States specific to user commands extractor Mode ('all')
   const [selectedPrompt, setSelectedPrompt] = useState<string>('');
   const [customPromptEnabled, setCustomPromptEnabled] = useState(false);
   const [customPromptText, setCustomPromptText] = useState('');
@@ -77,14 +75,18 @@ export default function App() {
 
   // Strips typical terminal device and SSH log timestamp prefixes to expose the raw prompt directly
   const cleanLineTimestamp = (line: string): string => {
+    // 0. Remove ANSI control characters / escape color sequences
+    let clean = line.replace(/[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, '');
+    clean = clean.replace(/\r/g, '').replace(/[\x08\x07]/g, '');
+
     // 1. Remove bracketed float timestamps (e.g. dmesg/uptime like `[  123.456789]`)
-    let clean = line.replace(/^\[\s*\d+(\.\d+)?\s*\]\s*/, '');
+    clean = clean.replace(/^\[\s*\d+(\.\d+)?\s*\]\s*/, '');
     
     // 1a. Remove custom bracketed datetime stamps like `[2025-12-11-163934]`
     clean = clean.replace(/^\[\s*\d{4}-\d{2}-\d{2}-\d{6}\s*\]\s*/, '');
     
-    // 2. Remove bracketed ISO8601/RFC3339 timestamps (e.g. `[2026-05-20 15:07:15]` or `[2026-05-20T15:07:15.123Z]`)
-    clean = clean.replace(/^\[\s*\d{4}[-/]\d{2}[-/]\d{2}[\sT]\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}(:?\d{2})?)?\s*\]\s*/, '');
+    // 2. Remove bracketed ISO8601/RFC3339 timestamps (e.g. `[2026-05-20 15:07:15]`, `[2026.05.19 16:35:02.452]`, or `[2026-05-20T15:07:15.123Z]`)
+    clean = clean.replace(/^\[\s*\d{4}[-/.]\d{2}[-/.]\d{2}[\sT]\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}(:?\d{2})?)?\s*\]\s*/, '');
     
     // 3. Remove bracketed syslog-like timestamps (e.g. `[May 20 15:07:15]`)
     clean = clean.replace(/^\[\s*(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d+\s+\d{2}:\d{2}:\d{2}(\s+\d{4})?\s*\]\s*/i, '');
@@ -95,8 +97,8 @@ export default function App() {
     // 4a. Remove custom hyphenated datetime stamps like `20251113_13:49:41`
     clean = clean.replace(/^\d{8}_\d{2}:\d{2}:\d{2}\s*/, '');
     
-    // 5. Remove plain ISO8601/RFC3339 timestamps (e.g. `2026-05-20 15:07:15` or `2026-05-20T15:07:15.123Z`)
-    clean = clean.replace(/^\d{4}[-/]\d{2}[-/]\d{2}[\sT]\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}(:?\d{2})?)?\s*/, '');
+    // 5. Remove plain ISO8601/RFC3339 timestamps (e.g. `2026-05-20 15:07:15`, `2026.05.19 16:35:02.452`, or `2026-05-20T15:07:15.123Z`)
+    clean = clean.replace(/^\d{4}[-/.]\d{2}[-/.]\d{2}[\sT]\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}(:?\d{2})?)?\s*/, '');
     
     // 6. Remove plain syslog-like timestamps (e.g. `May 20 15:07:15` or `May  9 15:07:15`)
     clean = clean.replace(/^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d+\s+\d{2}:\d{2}:\d{2}(\s+\d{4})?\s*/i, '');
@@ -117,8 +119,9 @@ export default function App() {
     const counts: Record<string, number> = {};
     
     // Patterns to capture typical command prompts ending in #, > or $
-    // Captures user@host:/path# or host> or BCM.0> or user$
+    // Captures explicit BCM interactive prompts, shell user@host:/path# or host> or user$
     const promptRegexes = [
+      /^\s*((?:BCM|bcm)[\w.()]*>)/,
       /^\s*([A-Za-z0-9_\-.~]+@[A-Za-z0-9_\-.]+:[^#$>]*[#$>])/,
       /^\s*([\w\-./\[\]]+[#$>])/
     ];
@@ -236,7 +239,7 @@ export default function App() {
     } catch (e) {
       pRegex = /^[>$#]\s*(.*)$/;
     }
-    
+
     let inContinualLine = false;
     let tempCommand = '';
     let tempLineNum = 0;
@@ -262,25 +265,31 @@ export default function App() {
           inContinualLine = false;
           tempCommand = '';
         }
-      } else {
-        const match = cleanLine.match(pRegex);
-        if (match) {
-          const fullCmd = match[1]?.trim() || '';
-          if (filterBlanks && !fullCmd) {
-            continue;
-          }
-          
-          if (fullCmd.endsWith('\\') && autoJoinContinuation) {
-            inContinualLine = true;
-            tempCommand = fullCmd.slice(0, -1).trim();
-            tempLineNum = lineNum;
-          } else {
-            result.push({
-              lineNum,
-              command: fullCmd,
-              rawLine: line
-            });
-          }
+        continue;
+      }
+
+      let matchedCommand: string | null = null;
+      const match = cleanLine.match(pRegex);
+      if (match) {
+        matchedCommand = match[1];
+      }
+
+      if (matchedCommand !== null) {
+        const fullCmd = matchedCommand.trim();
+        if (filterBlanks && !fullCmd) {
+          continue;
+        }
+        
+        if (fullCmd.endsWith('\\') && autoJoinContinuation) {
+          inContinualLine = true;
+          tempCommand = fullCmd.slice(0, -1).trim();
+          tempLineNum = lineNum;
+        } else {
+          result.push({
+            lineNum,
+            command: fullCmd,
+            rawLine: line
+          });
         }
       }
     }
@@ -373,18 +382,13 @@ export default function App() {
 
       // Case 1: Target Command is empty, but Ending pattern is configured:
       // Output every line from the start of file up to the line right before the ending pattern is matched.
-      // If there are multiple matches, extract for each occurrence to let the user select the correct stop point.
       if (!targetInput && endInput) {
-        let promptRegex: RegExp;
-        try {
-          promptRegex = new RegExp(endInput);
-        } catch (e) {
-          promptRegex = new RegExp(endInput.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&'));
-        }
+        const endKeywords = endInput.toLowerCase().split(/\s+/).filter(k => k.length > 0);
 
         const matchIndices: number[] = [];
         for (let i = 0; i < lines.length; i++) {
-          if (promptRegex.test(lines[i])) {
+          const lowerLine = lines[i].toLowerCase();
+          if (endKeywords.every(kw => lowerLine.includes(kw))) {
             matchIndices.push(i);
           }
         }
@@ -407,47 +411,51 @@ export default function App() {
         return;
       }
 
-      // Case 2: Target Command is present, ending pattern may or may not be empty (existing standard behavior with fuzzy match)
-      const keywords = targetInput.toLowerCase().split(/\s+/).filter(k => k.length > 0);
+      // Case 2: Target Command is present, ending pattern is also present:
+      // Standard pair extraction
+      if (targetInput && endInput) {
+        const targetKeywords = targetInput.toLowerCase().split(/\s+/).filter(k => k.length > 0);
+        const endKeywords = endInput.toLowerCase().split(/\s+/).filter(k => k.length > 0);
 
-      let current: ExtractionResult | null = null;
-      let promptRegex: RegExp;
-      try {
-        // If empty, use a default common prompt pattern
-        promptRegex = new RegExp(endInput || '^[>$#]');
-      } catch (e) {
-        promptRegex = /^[>$#]/;
-      }
-
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
-        const lineNum = i + 1;
-        const lowerLine = line.toLowerCase();
-
-        // Check if all keywords are present in the line
-        const isMatch = keywords.every(kw => lowerLine.includes(kw));
-
-        if (isMatch) {
-          if (current) {
-            allExtracted.push(current);
-          }
-          current = {
-            lineNum,
-            command: line,
-            output: [],
-            pairId: pair.id
-          };
-        } else if (current) {
-          if (promptRegex.test(line)) {
-            allExtracted.push(current);
-            current = null;
-          } else {
-            current.output.push(line);
+        let current: ExtractionResult | null = null;
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i];
+          const lowerLine = line.toLowerCase();
+          
+          if (targetKeywords.every(kw => lowerLine.includes(kw))) {
+             if (current) allExtracted.push(current);
+             current = { lineNum: i + 1, command: line, output: [], pairId: pair.id };
+          } else if (current) {
+            if (endKeywords.every(kw => lowerLine.includes(kw))) {
+              allExtracted.push(current);
+              current = null;
+            } else {
+              current.output.push(line);
+            }
           }
         }
+        if (current) allExtracted.push(current);
+        return;
       }
-      if (current) {
-        allExtracted.push(current);
+
+      // Case 3: Target Command is present, but Ending pattern is empty
+      if (targetInput && !endInput) {
+        const targetKeywords = targetInput.toLowerCase().split(/\s+/).filter(k => k.length > 0);
+        let found = false;
+        for (let i = 0; i < lines.length; i++) {
+          if (targetKeywords.every(kw => lines[i].toLowerCase().includes(kw))) {
+            found = true;
+            break;
+          }
+        }
+        
+        allExtracted.push({
+          lineNum: 0,
+          command: found ? `请输入结束命令关键词` : `未在日志中找到任何匹配命令`,
+          output: [],
+          pairId: pair.id
+        });
+        return;
       }
     });
 
@@ -680,18 +688,37 @@ export default function App() {
     };
     
     // 1. Product Model extraction
-    // First scan: prioritize PRODUCT NAME directly
+    // New: First scan: prioritize syseeprom tool
     for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-      const match = line.match(/\bproduct[-_]?name\s*[:=]\s*([^\r\n]+)/i);
-      if (match) {
-        let val = match[1].trim();
-        val = val.replace(/^["']|["']$/g, '').trim();
-        if (val) {
-          productModel = cleanModelString(val);
-          productModelSource = "PRODUCT NAME 直接字段";
-          productModelLine = i + 1;
-          break;
+      if (lines[i].includes('ft-decode-syseeprom.py')) {
+        for (let j = i + 1; j < Math.min(i + 15, lines.length); j++) {
+          if (lines[j].includes('Product Name')) {
+            const parts = lines[j].trim().split(/\s+/);
+            const model = parts[parts.length - 1];
+            productModel = cleanModelString(model);
+            productModelSource = "syseeprom 工具提取";
+            productModelLine = j + 1;
+            break;
+          }
+        }
+        if (productModel !== "UNKNOWN") break;
+      }
+    }
+
+    // Second scan: prioritize PRODUCT NAME directly
+    if (productModel === "UNKNOWN") {
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        const match = line.match(/\bproduct[-_]?name\s*[:=]\s*([^\r\n]+)/i);
+        if (match) {
+          let val = match[1].trim();
+          val = val.replace(/^["']|["']$/g, '').trim();
+          if (val) {
+            productModel = cleanModelString(val);
+            productModelSource = "PRODUCT NAME 直接字段";
+            productModelLine = i + 1;
+            break;
+          }
         }
       }
     }
@@ -1383,7 +1410,7 @@ export default function App() {
               {/* Log Upload Section - Moved to Top */}
               <div>
                 <h2 className="text-[15px] font-semibold tracking-tight">日志上传</h2>
-                <p className="text-sm text-[#86868b] mt-1 mb-6">首先上传需要处理的日志文件</p>
+                <p className="text-sm text-[#86868b] mt-1 mb-6">上传需要处理的日志文件</p>
                 <div className="space-y-4">
                   <div 
                     onClick={() => fileInputRef.current?.click()}
@@ -1432,7 +1459,7 @@ export default function App() {
               {/* Config view switcher based on App Mode */}
               {appMode === 'all' ? (
                 <>
-                  {/* Smart Prompt Detection (only if file loaded) */}
+                  {/* BCM & Shell Extraction Strategy Selector */}
                   {logContent && (
                     <div className="pt-10 border-t border-black/5 animate-fadeIn space-y-4">
                       <div className="flex justify-between items-baseline">
@@ -1507,7 +1534,6 @@ export default function App() {
                       </div>
                     </div>
                   )}
-
                 </>
               ) : appMode === 'targeted' ? (
                 /* Command Configuration Section - Moved Below Upload */
@@ -1602,61 +1628,45 @@ export default function App() {
 
                   <div>
                     <h2 className="text-[14px] md:text-[15px] font-semibold tracking-tight text-[#1d1d1f] flex items-center gap-1.5">
-                      <span>⚙️</span> 芯片故障诊断探针配置
+                      <span>⚙️</span> 芯片故障诊断配置
                     </h2>
                     <p className="text-xs text-[#86868b] mt-1 leading-relaxed">
-                      基于设备运行时产生的 SerDes、ASIC 底层日志开展故障智能匹配与管脚定位。
+                      基于 SerDes/ASIC 日志执行故障匹配与管脚定位。
                     </p>
                   </div>
 
-                  <div className="space-y-4">
+                  <div className="space-y-3">
                     {/* Item 1 */}
-                    <div className="bg-[#f5f5f7] rounded-2xl p-5 border border-black/5 space-y-3">
-                      <h3 className="text-xs font-bold text-[#1d1d1f] uppercase tracking-wider flex items-center gap-2">
-                        <span className="w-2 h-2 rounded-full bg-blue-500"></span>
-                        诊断检测项 1：产品型号与 SDK 固件版本提取
+                    <div className="bg-[#f5f5f7] rounded-xl p-4 border border-black/5 space-y-2">
+                      <h3 className="text-[11px] font-bold text-[#1d1d1f] uppercase tracking-wider flex items-center gap-2">
+                        <span className="w-1.5 h-1.5 rounded-full bg-blue-500"></span>
+                        硬件/固件识别
                       </h3>
-                      <p className="text-[11px] text-[#86868b] leading-relaxed">
-                        深度扫描日志全文，通过 PRODUCT NAME 字段、ONIE 环境变量、主板 DMI、设备树或 machine.conf 清单，按规则推断及智能清洗输出标准化设备产品型号，并同步提取 Broadcom SDK 固件版本。
+                      <p className="text-[10px] text-[#86868b]">
+                        自动提取 <span className="font-mono text-[#1d1d1f]">Model</span>, <span className="font-mono text-[#1d1d1f]">ONIE</span>, <span className="font-mono text-[#1d1d1f]">SDK版本</span>。清洗架构前缀与修订后缀。
                       </p>
-                      <div className="bg-white border border-black/[0.04] p-3 rounded-xl text-[10px] text-[#555] font-mono leading-relaxed space-y-1">
-                        <div><strong className="text-[#0071e3]">型号来源：</strong>PRODUCT NAME、onie_machine、onie_platform等备选变量</div>
-                        <div><strong className="text-[#0071e3]">SDK 匹配：</strong>包含 <code className="bg-black/5 px-1 py-0.5 rounded text-red-500 font-mono text-[9px]">Release: sdk-</code> 标识整机底层固件套件版本</div>
-                        <div><strong className="text-[#0071e3]">清洗特征：</strong>自动去除 x86_64- 架构前缀与 -r0 修订版后缀 (如 tencent_tcs8400)</div>
-                      </div>
                     </div>
 
                     {/* Item 2 */}
-                    <div className="bg-[#f5f5f7] rounded-2xl p-5 border border-black/5 space-y-3">
-                      <h3 className="text-xs font-bold text-[#1d1d1f] uppercase tracking-wider flex items-center gap-2">
-                        <span className="w-2 h-2 rounded-full bg-red-500"></span>
-                        诊断检测项 2：微控制器 uc_sts 运行异常位
+                    <div className="bg-[#f5f5f7] rounded-xl p-4 border border-black/5 space-y-2">
+                      <h3 className="text-[11px] font-bold text-[#1d1d1f] uppercase tracking-wider flex items-center gap-2">
+                        <span className="w-1.5 h-1.5 rounded-full bg-red-500"></span>
+                        运行异常监控
                       </h3>
-                      <p className="text-[11px] text-[#86868b] leading-relaxed">
-                        精准锁定带有 <code className="bg-[#f5f5f7] px-1 py-0.5 rounded text-red-500 font-mono text-[9px]">uc_sts BIT</code> / <code className="bg-[#f5f5f7] px-1 py-0.5 rounded text-red-500 font-mono text-[9px]">uc_sts_ext BIT</code> 的硬件报故障日志。
+                      <p className="text-[10px] text-[#86868b]">
+                        精准定位 <span className="font-mono text-[#1d1d1f]">uc_sts</span> / <span className="font-mono text-[#1d1d1f]">uc_sts_ext</span> 关键底层错误位。自动追溯上下文。
                       </p>
-                      <div className="bg-white border border-black/[0.04] p-3 rounded-xl text-[10px] text-[#555] font-mono leading-relaxed space-y-1.5">
-                        <div className="flex justify-between">
-                           <span>📊 <strong>提取上下文：</strong>向上追溯至最近一次 <code>dsh -c 'phy diag</code> 字段，向下追溯 6 行</span>
-                           <span className="text-[#0071e3] font-bold">自适应上下文</span>
-                        </div>
-                        <div>🛡️ <strong>独立提取去重：</strong>按捕获点独立输出，带首尾溢出及文件触顶/底边界气泡。</div>
-                      </div>
                     </div>
 
                     {/* Item 3 */}
-                    <div className="bg-[#f5f5f7] rounded-2xl p-5 border border-black/5 space-y-3">
-                      <h3 className="text-xs font-bold text-[#1d1d1f] uppercase tracking-wider flex items-center gap-2">
-                        <span className="w-2 h-2 rounded-full bg-amber-500"></span>
-                        诊断检测项 3：Link Training (LT) 分轨链路电平探测
+                    <div className="bg-[#f5f5f7] rounded-xl p-4 border border-black/5 space-y-2">
+                      <h3 className="text-[11px] font-bold text-[#1d1d1f] uppercase tracking-wider flex items-center gap-2">
+                        <span className="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
+                        链路电平探测
                       </h3>
-                      <p className="text-[11px] text-[#86868b] leading-relaxed">
-                        通篇检索物理接口的 Link UP / DOWN 变迁历史。根据流式时序中的 <code className="bg-[#f5f5f7] px-1 py-0.5 rounded text-amber-600 font-mono text-[9px]">link_training</code> 的特征标志（0-OFF / 1-ON），分类聚合与溯源物理电平。
+                      <p className="text-[10px] text-[#86868b]">
+                        检索 <span className="font-mono text-[#1d1d1f]">Link Training</span> 变迁，智能聚合物理链路状态与异构日志。
                       </p>
-                      <div className="bg-white border border-black/[0.04] p-3 rounded-xl text-[10px] text-[#555] font-mono leading-relaxed space-y-1.5">
-                        <div>🔗 <strong>LT 分类隔离：</strong>区分不同 LT 配置态下的最终链路电平，重构状态全貌.</div>
-                        <div>📊 <strong>异构语法兼容：</strong>自动识别诊断表格各对齐列，且深度兼融单行模糊不规则语句.</div>
-                      </div>
                     </div>
                   </div>
 
@@ -2047,47 +2057,55 @@ export default function App() {
                       {(Object.entries(groupedResults || {}) as [string, ExtractionResult[]][]).map(([pairId, pairResults]) => {
                         const pair = commandPairs.find(p => p.id === pairId);
                         if (!pair) return null;
+                        const isConfigError = pairResults.length === 1 && pairResults[0].lineNum === 0;
                         const isExpanded = expandedGroups.has(pairId);
                         
                         return (
                           <div key={pairId} className="bg-white rounded-2xl overflow-hidden shadow-sm border border-black/5">
-                            <div 
-                              onClick={() => toggleGroup(pairId)}
-                              className="flex justify-between items-center p-5 cursor-pointer hover:bg-black/[0.02] transition-colors"
-                            >
-                              <div className="flex items-center gap-4">
-                                <div className={`w-8 h-8 rounded-full flex items-center justify-center transition-colors ${isExpanded ? 'bg-[#0071e3] text-white' : 'bg-[#f5f5f7] text-[#86868b]'}`}>
-                                  {isExpanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-                                </div>
-                                <div>
-                                  <span className="text-[13px] font-semibold block animate-fadeIn">
-                                    {pair.targetCommand || `[从文件开头 ➔ 直到结束标识: ${pair.promptPattern}]`}
-                                  </span>
-                                  <span className="text-[10px] text-[#86868b] font-medium uppercase tracking-wider">
-                                    {pairResults.length} 个匹配项
-                                  </span>
-                                </div>
+                            {isConfigError ? (
+                              <div className="py-12 flex flex-col items-center justify-center text-[#ff3b30] text-center w-full px-5">
+                                <AlertCircle className="w-12 h-12 mb-4 opacity-50" />
+                                <p className="font-semibold">{pairResults[0].command}</p>
                               </div>
-                              <div className="flex gap-2" onClick={(e) => e.stopPropagation()}>
-                                <button 
-                                  onClick={() => copyPairToClipboard(pairId)}
-                                  className="p-2 text-[#86868b] hover:text-[#0071e3] hover:bg-[#0071e3]/5 rounded-full transition-all"
-                                  title="复制该组结果"
+                            ) : (
+                              <>
+                                <div 
+                                  onClick={() => toggleGroup(pairId)}
+                                  className="flex justify-between items-center p-5 cursor-pointer hover:bg-black/[0.02] transition-colors"
                                 >
-                                  <Clipboard className="w-4 h-4" />
-                                </button>
-                                <button 
-                                  onClick={() => downloadPairResult(pairId)}
-                                  className="p-2 text-[#86868b] hover:text-[#0071e3] hover:bg-[#0071e3]/5 rounded-full transition-all"
-                                  title="下载该组结果"
-                                >
-                                  <Download className="w-4 h-4" />
-                                </button>
-                              </div>
-                            </div>
-                            
-                            <AnimatePresence>
-                              {isExpanded && (
+                                  <div className="flex items-center gap-4">
+                                    <div className={`w-8 h-8 rounded-full flex items-center justify-center transition-colors ${isExpanded ? 'bg-[#0071e3] text-white' : 'bg-[#f5f5f7] text-[#86868b]'}`}>
+                                      {isExpanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                                    </div>
+                                    <div>
+                                      <span className="text-[13px] font-semibold block animate-fadeIn">
+                                        {pair.targetCommand || `[从文件开头 ➔ 直到结束标识: ${pair.promptPattern}]`}
+                                      </span>
+                                      <span className="text-[10px] text-[#86868b] font-medium uppercase tracking-wider">
+                                        {pairResults.length} 个匹配项
+                                      </span>
+                                    </div>
+                                  </div>
+                                  <div className="flex gap-2" onClick={(e) => e.stopPropagation()}>
+                                    <button 
+                                      onClick={() => copyPairToClipboard(pairId)}
+                                      className="p-2 text-[#86868b] hover:text-[#0071e3] hover:bg-[#0071e3]/5 rounded-full transition-all"
+                                      title="复制该组结果"
+                                    >
+                                      <Clipboard className="w-4 h-4" />
+                                    </button>
+                                    <button 
+                                      onClick={() => downloadPairResult(pairId)}
+                                      className="p-2 text-[#86868b] hover:text-[#0071e3] hover:bg-[#0071e3]/5 rounded-full transition-all"
+                                      title="下载该组结果"
+                                    >
+                                      <Download className="w-4 h-4" />
+                                    </button>
+                                  </div>
+                                </div>
+                                
+                                <AnimatePresence>
+                                  {isExpanded && (
                                 <motion.div 
                                   initial={{ height: 0, opacity: 0 }}
                                   animate={{ height: 'auto', opacity: 1 }}
@@ -2163,6 +2181,8 @@ export default function App() {
                                 </motion.div>
                               )}
                             </AnimatePresence>
+                            </>
+                          )}
                           </div>
                         );
                       })}
