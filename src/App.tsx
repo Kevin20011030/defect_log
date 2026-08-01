@@ -39,6 +39,15 @@ interface ExtractionResult {
   pairId: string;
 }
 
+interface LoopbackResult {
+  portName: string;
+  loopType: 'mac' | 'phy';
+  linkStatus: 'up' | 'down' | 'unknown';
+  lineNum: number;
+  statusLineNum?: number;
+  rawCommand: string;
+}
+
 export default function App() {
   const [appMode, setAppMode] = useState<'all' | 'targeted' | 'fault'>('all');
   const [commandPairs, setCommandPairs] = useState<CommandPair[]>([
@@ -327,6 +336,99 @@ export default function App() {
     a.href = url;
     const cleanFileName = fileName ? fileName.replace(/\.[^/.]+$/, "") : "session_commands";
     a.download = `${cleanFileName}_extracted_commands.log`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const loopbackResults = useMemo<LoopbackResult[]>(() => {
+    if (!logContent) return [];
+    const lines = logContent.split(/\r?\n/);
+    const results: LoopbackResult[] = [];
+
+    const lbCmdRegex = /port\s+(\S+)\s+lb=(mac|phy)/i;
+    const portStatusRegex = /^\s*([a-zA-Z0-9_-]+)(?:\s*\([^)]*\))?\s+(up|down)\b/i;
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const match = line.match(lbCmdRegex);
+      if (match) {
+        const portName = match[1];
+        const loopType = match[2].toLowerCase() as 'mac' | 'phy';
+        
+        let linkStatus: 'up' | 'down' | 'unknown' = 'unknown';
+        let statusLineNum: number | undefined = undefined;
+
+        for (let j = i + 1; j < Math.min(lines.length, i + 50); j++) {
+          const nextLine = lines[j];
+          const statusMatch = nextLine.match(portStatusRegex);
+          if (statusMatch) {
+            const foundPort = statusMatch[1];
+            if (foundPort.toLowerCase() === portName.toLowerCase()) {
+              linkStatus = statusMatch[2].toLowerCase() as 'up' | 'down';
+              statusLineNum = j + 1;
+              break;
+            }
+          }
+        }
+
+        results.push({
+          portName,
+          loopType,
+          linkStatus,
+          lineNum: i + 1,
+          statusLineNum,
+          rawCommand: line.trim()
+        });
+      }
+    }
+
+    if (results.length === 0) {
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        const statusMatch = line.match(portStatusRegex);
+        if (statusMatch) {
+          const portName = statusMatch[1];
+          const linkStatus = statusMatch[2].toLowerCase() as 'up' | 'down';
+          const upperLine = line.toUpperCase();
+          let loopType: 'mac' | 'phy' = 'mac';
+          if (upperLine.includes('PHY')) {
+            loopType = 'phy';
+          } else if (upperLine.includes('MAC') || upperLine.includes('LB') || upperLine.includes('LOOP')) {
+            loopType = 'mac';
+          } else {
+            continue;
+          }
+          results.push({
+            portName,
+            loopType,
+            linkStatus,
+            lineNum: i + 1,
+            rawCommand: line.trim()
+          });
+        }
+      }
+    }
+
+    return results;
+  }, [logContent]);
+
+  const copyLoopbackResults = () => {
+    if (loopbackResults.length === 0) return;
+    const text = loopbackResults.map(r => `Port: ${r.portName} | Type: ${r.loopType.toUpperCase()} | Status: ${r.linkStatus.toUpperCase()} | Line: L${r.lineNum}`).join('\n');
+    navigator.clipboard.writeText(text);
+  };
+
+  const downloadLoopbackResults = () => {
+    if (loopbackResults.length === 0) return;
+    let text = "Port\tLoopType\tLinkStatus\tLine\n";
+    loopbackResults.forEach(r => {
+      text += `${r.portName}\t${r.loopType}\t${r.linkStatus}\tL${r.lineNum}\n`;
+    });
+    const blob = new Blob([text], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `loopback_port_status_report.txt`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -1626,52 +1728,108 @@ export default function App() {
                     </div>
                   )}
 
-                  <div>
-                    <h2 className="text-[14px] md:text-[15px] font-semibold tracking-tight text-[#1d1d1f] flex items-center gap-1.5">
-                      <span>⚙️</span> 芯片故障诊断配置
-                    </h2>
-                    <p className="text-xs text-[#86868b] mt-1 leading-relaxed">
-                      基于 SerDes/ASIC 日志执行故障匹配与管脚定位。
-                    </p>
-                  </div>
-
-                  <div className="space-y-3">
-                    {/* Item 1 */}
-                    <div className="bg-[#f5f5f7] rounded-xl p-4 border border-black/5 space-y-2">
-                      <h3 className="text-[11px] font-bold text-[#1d1d1f] uppercase tracking-wider flex items-center gap-2">
-                        <span className="w-1.5 h-1.5 rounded-full bg-blue-500"></span>
-                        硬件/固件识别
-                      </h3>
-                      <p className="text-[10px] text-[#86868b]">
-                        自动提取 <span className="font-mono text-[#1d1d1f]">Model</span>, <span className="font-mono text-[#1d1d1f]">ONIE</span>, <span className="font-mono text-[#1d1d1f]">SDK版本</span>。清洗架构前缀与修订后缀。
+                  {/* 自环测试端口状态检测 Widget */}
+                  <div className="space-y-4 pt-2">
+                    <div>
+                      <div className="flex justify-between items-center">
+                        <h2 className="text-[14px] md:text-[15px] font-semibold tracking-tight text-[#1d1d1f] flex items-center gap-1.5">
+                          <span>🔄</span> 自环端口状态检测
+                        </h2>
+                        {loopbackResults.length > 0 && (
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={copyLoopbackResults}
+                              className="text-[11px] px-2.5 py-1 bg-white border border-black/10 rounded-lg text-[#1d1d1f] hover:bg-[#f5f5f7] transition-all font-medium flex items-center gap-1"
+                              title="复制自环检测结果"
+                            >
+                              <Clipboard className="w-3 h-3 text-[#0071e3]" />
+                              复制
+                            </button>
+                            <button
+                              onClick={downloadLoopbackResults}
+                              className="text-[11px] px-2.5 py-1 bg-white border border-black/10 rounded-lg text-[#1d1d1f] hover:bg-[#f5f5f7] transition-all font-medium flex items-center gap-1"
+                              title="下载自环检测报告"
+                            >
+                              <Download className="w-3 h-3 text-[#0071e3]" />
+                              下载
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                      <p className="text-xs text-[#86868b] mt-1 leading-relaxed">
+                        基于自环设置命令（lb=mac / lb=phy）与后续状态输出（ps），自动检索并汇总对应自环端口的实时链路状态。
                       </p>
                     </div>
 
-                    {/* Item 2 */}
-                    <div className="bg-[#f5f5f7] rounded-xl p-4 border border-black/5 space-y-2">
-                      <h3 className="text-[11px] font-bold text-[#1d1d1f] uppercase tracking-wider flex items-center gap-2">
-                        <span className="w-1.5 h-1.5 rounded-full bg-red-500"></span>
-                        运行异常监控
-                      </h3>
-                      <p className="text-[10px] text-[#86868b]">
-                        精准定位 <span className="font-mono text-[#1d1d1f]">uc_sts</span> / <span className="font-mono text-[#1d1d1f]">uc_sts_ext</span> 关键底层错误位。自动追溯上下文。
-                      </p>
-                    </div>
-
-                    {/* Item 3 */}
-                    <div className="bg-[#f5f5f7] rounded-xl p-4 border border-black/5 space-y-2">
-                      <h3 className="text-[11px] font-bold text-[#1d1d1f] uppercase tracking-wider flex items-center gap-2">
-                        <span className="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
-                        链路电平探测
-                      </h3>
-                      <p className="text-[10px] text-[#86868b]">
-                        检索 <span className="font-mono text-[#1d1d1f]">Link Training</span> 变迁，智能聚合物理链路状态与异构日志。
-                      </p>
+                    <div className="bg-[#f5f5f7] rounded-2xl p-5 border border-black/5 space-y-3">
+                      {logContent ? (
+                        loopbackResults.length > 0 ? (
+                          <div className="space-y-3">
+                            <div className="flex items-center justify-between text-[11px] text-[#86868b] px-1 font-medium">
+                              <span>共检测到 {loopbackResults.length} 个自环端口配置</span>
+                              <span className="text-[#24a148]">
+                                UP: {loopbackResults.filter(r => r.linkStatus === 'up').length} | DOWN: {loopbackResults.filter(r => r.linkStatus === 'down').length}
+                              </span>
+                            </div>
+                            <div className="bg-white rounded-xl border border-black/5 overflow-hidden max-h-60 overflow-y-auto custom-scrollbar">
+                              <table className="w-full text-left text-xs">
+                                <thead className="bg-[#f9f9fb] border-b border-black/5 text-[10px] text-[#86868b] uppercase font-bold sticky top-0">
+                                  <tr>
+                                    <th className="py-2.5 px-3">端口名</th>
+                                    <th className="py-2.5 px-3">自环类型</th>
+                                    <th className="py-2.5 px-3">Link状态</th>
+                                    <th className="py-2.5 px-3">行号</th>
+                                  </tr>
+                                </thead>
+                                <tbody className="divide-y divide-black/5 font-mono text-[11px]">
+                                  {loopbackResults.map((res, i) => (
+                                    <tr key={i} className="hover:bg-black/[0.01] transition-colors">
+                                      <td className="py-2 px-3 font-semibold text-[#1d1d1f]">{res.portName}</td>
+                                      <td className="py-2 px-3">
+                                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                                          res.loopType === 'mac' ? 'bg-purple-500/10 text-purple-600' : 'bg-blue-500/10 text-blue-600'
+                                        }`}>
+                                          {res.loopType}
+                                        </span>
+                                      </td>
+                                      <td className="py-2 px-3">
+                                        <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                                          res.linkStatus === 'up' 
+                                            ? 'bg-green-500/10 text-green-600' 
+                                            : res.linkStatus === 'down' 
+                                              ? 'bg-red-500/10 text-red-600' 
+                                              : 'bg-gray-500/10 text-gray-500'
+                                        }`}>
+                                          <span className={`w-1.5 h-1.5 rounded-full ${
+                                            res.linkStatus === 'up' ? 'bg-green-500' : res.linkStatus === 'down' ? 'bg-red-500' : 'bg-gray-400'
+                                          }`} />
+                                          {res.linkStatus.toUpperCase()}
+                                        </span>
+                                      </td>
+                                      <td className="py-2 px-3 text-[#86868b]">L{res.lineNum}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="py-6 text-center text-[#86868b] text-xs">
+                            <p className="font-medium text-[#1d1d1f]">未在当前日志中检测到明确的自环命令（lb=mac / lb=phy）</p>
+                            <p className="text-[10px] text-[#86868b] mt-1">请确认上传的日志包含交换机端口自环配置与状态列表（ps）输出。</p>
+                          </div>
+                        )
+                      ) : (
+                        <div className="py-6 text-center text-[#86868b] text-xs">
+                          <p className="font-medium text-[#1d1d1f]">请先上传日志文件</p>
+                          <p className="text-[10px] text-[#86868b] mt-1">上传后系统将自动进行自环端口状态解析与汇总。</p>
+                        </div>
+                      )}
                     </div>
                   </div>
 
                   {/* 故障芯片管脚定位 Widget */}
-                  <div className="pt-8 border-t border-black/5 space-y-4">
+                  <div className="space-y-4">
                     <div>
                       <h2 className="text-[14px] md:text-[15px] font-semibold tracking-tight text-[#1d1d1f] flex items-center gap-1.5">
                         <span>🔍</span> 故障芯片管脚定位
