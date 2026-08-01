@@ -344,68 +344,78 @@ export default function App() {
     if (!logContent) return [];
     const lines = logContent.split(/\r?\n/);
     const results: LoopbackResult[] = [];
+    const seenPorts = new Set<string>();
 
-    const lbCmdRegex = /port\s+(\S+)\s+lb=(mac|phy)/i;
-    const portStatusRegex = /^\s*([a-zA-Z0-9_-]+)(?:\s*\([^)]*\))?\s+(up|down)\b/i;
+    const indexToCdMap = new Map<string, string>();
+    const psLineRegex = /^\s*(cd[a-zA-Z0-9_\-\/\.]+)\s*\(\s*([0-9]+)\s*\)/i;
+    for (const line of lines) {
+      const clean = cleanLineTimestamp(line);
+      const m = clean.match(psLineRegex);
+      if (m) {
+        const cdName = m[1].toLowerCase();
+        const idx = m[2];
+        indexToCdMap.set(idx, cdName);
+        indexToCdMap.set(cdName, cdName);
+      }
+    }
 
+    const normalizePortName = (raw: string): string => {
+      const trimmed = raw.trim();
+      if (/^\d+$/.test(trimmed)) {
+        if (indexToCdMap.has(trimmed)) {
+          return indexToCdMap.get(trimmed)!;
+        }
+        return `cd${trimmed}`;
+      }
+      const matchCd = trimmed.match(/(cd[0-9]+)/i);
+      if (matchCd) {
+        return matchCd[1].toLowerCase();
+      }
+      if (indexToCdMap.has(trimmed.toLowerCase())) {
+        return indexToCdMap.get(trimmed.toLowerCase())!;
+      }
+      return trimmed.toLowerCase();
+    };
+
+    // 仅通过 ps 命令输出列表的最后一列来判断自环状态：
+    // 如果末尾的 Token 为 PHY 或 MAC（不区分大小写），则认为该端口处于对应的自环模式。
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
-      const match = line.match(lbCmdRegex);
-      if (match) {
-        const portName = match[1];
-        const loopType = match[2].toLowerCase() as 'mac' | 'phy';
-        
-        let linkStatus: 'up' | 'down' | 'unknown' = 'unknown';
-        let statusLineNum: number | undefined = undefined;
+      const cleanLine = cleanLineTimestamp(line);
+      const tokens = cleanLine.trim().split(/\s+/);
+      if (tokens.length < 3) continue; // 必须有足够数量的 Token 才可能是 ps 状态行
 
-        for (let j = i + 1; j < Math.min(lines.length, i + 50); j++) {
-          const nextLine = lines[j];
-          const statusMatch = nextLine.match(portStatusRegex);
-          if (statusMatch) {
-            const foundPort = statusMatch[1];
-            if (foundPort.toLowerCase() === portName.toLowerCase()) {
-              linkStatus = statusMatch[2].toLowerCase() as 'up' | 'down';
-              statusLineNum = j + 1;
-              break;
-            }
+      const lastToken = tokens[tokens.length - 1].toUpperCase();
+      if (lastToken === 'PHY' || lastToken === 'MAC') {
+        // 第一列是 port，如 "cd16(" 或 "cd16" 或 "xe0"
+        const rawPort = tokens[0].replace(/[^a-zA-Z0-9_\-\/\.]/g, '');
+        if (!rawPort) continue;
+        const portName = normalizePortName(rawPort);
+
+        // 寻找 port 之后的第一个 "up" 或 "down" (不区分大小写) 作为 link 状态
+        let linkStatus: 'up' | 'down' | 'unknown' = 'unknown';
+        for (let j = 1; j < tokens.length; j++) {
+          const t = tokens[j].toLowerCase();
+          if (t === 'up' || t === 'down') {
+            linkStatus = t as 'up' | 'down';
+            break;
           }
         }
+
+        if (linkStatus === 'unknown') continue; // 如果找不到 link 状态，则可能不是有效的 ps 状态行
+
+        const loopType: 'mac' | 'phy' = lastToken === 'PHY' ? 'phy' : 'mac';
+        const portKey = portName.toLowerCase();
 
         results.push({
           portName,
           loopType,
           linkStatus,
           lineNum: i + 1,
-          statusLineNum,
+          statusLineNum: i + 1,
           rawCommand: line.trim()
         });
-      }
-    }
-
-    if (results.length === 0) {
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
-        const statusMatch = line.match(portStatusRegex);
-        if (statusMatch) {
-          const portName = statusMatch[1];
-          const linkStatus = statusMatch[2].toLowerCase() as 'up' | 'down';
-          const upperLine = line.toUpperCase();
-          let loopType: 'mac' | 'phy' = 'mac';
-          if (upperLine.includes('PHY')) {
-            loopType = 'phy';
-          } else if (upperLine.includes('MAC') || upperLine.includes('LB') || upperLine.includes('LOOP')) {
-            loopType = 'mac';
-          } else {
-            continue;
-          }
-          results.push({
-            portName,
-            loopType,
-            linkStatus,
-            lineNum: i + 1,
-            rawCommand: line.trim()
-          });
-        }
+        seenPorts.add(portKey);
       }
     }
 
@@ -1756,9 +1766,7 @@ export default function App() {
                           </div>
                         )}
                       </div>
-                      <p className="text-xs text-[#86868b] mt-1 leading-relaxed">
-                        基于自环设置命令（lb=mac / lb=phy）与后续状态输出（ps），自动检索并汇总对应自环端口的实时链路状态。
-                      </p>
+                      {/* Removed description paragraph for cleaner layout */}
                     </div>
 
                     <div className="bg-[#f5f5f7] rounded-2xl p-5 border border-black/5 space-y-3">
@@ -1815,8 +1823,8 @@ export default function App() {
                           </div>
                         ) : (
                           <div className="py-6 text-center text-[#86868b] text-xs">
-                            <p className="font-medium text-[#1d1d1f]">未在当前日志中检测到明确的自环命令（lb=mac / lb=phy）</p>
-                            <p className="text-[10px] text-[#86868b] mt-1">请确认上传的日志包含交换机端口自环配置与状态列表（ps）输出。</p>
+                            <p className="font-medium text-[#1d1d1f]">未在当前日志中检测到自环端口（ps 状态表末列 PHY/MAC 或 CLI 命令行）</p>
+                            <p className="text-[10px] text-[#86868b] mt-1">请确认上传的日志包含交换机自环配置命令行，或其 ps 端口状态表最后一列明确标识了 PHY / MAC 回环模式。</p>
                           </div>
                         )
                       ) : (
@@ -1834,9 +1842,7 @@ export default function App() {
                       <h2 className="text-[14px] md:text-[15px] font-semibold tracking-tight text-[#1d1d1f] flex items-center gap-1.5">
                         <span>🔍</span> 故障芯片管脚定位
                       </h2>
-                      <p className="text-xs text-[#86868b] mt-1 leading-relaxed">
-                        根据选择的产品型号（当前支持 AS14）、输入的 CD 号、Lane 号以及传输流向，从对应映射关系中检索出对应芯片的 Pin 名称和管脚编号。
-                      </p>
+                      {/* Removed description paragraph for cleaner layout */}
                     </div>
 
                     <div className="bg-[#f5f5f7] rounded-2xl p-5 border border-black/5 space-y-4">
